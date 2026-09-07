@@ -2,7 +2,7 @@
 
 An ESP32-powered round-display clock that shows the current time, date, and real-time moon phase — fetched from NASA's Dial-a-Moon API and rendered with a 30-frame moon image cycle.
 
-This project is an adaptation of a project from [nishad2m8](https://github.com/nishad2m8) 
+This project is an adaptation of a project from [nishad2m8](https://github.com/nishad2m8) & [LazydaysCr](https://github.com/LazydaysCr)
 
 Modified with Claude.ai to add Moon Rise/Set time
 
