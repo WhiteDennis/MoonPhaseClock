@@ -5,7 +5,7 @@
  * What this does:
  *  - Connects to WiFi, syncs time via NTP
  *  - Updates the time/date labels every second from the system clock
- *  - Periodically fetches the current moon age from NASA's Dial-a-Moon API
+ *  - Periodically fetches the daily moon phase from MET Norway's Sunrise API
  *    and updates the phase name label + moon image accordingly
  *
  * NOTE: TFT pin mapping lives in platformio.ini build_flags.
@@ -79,9 +79,7 @@ static const lv_img_dsc_t *moon_frames[30] = {
 
 // ---- Update timers ----
 const uint32_t CLOCK_UPDATE_MS = 1000;                 // refresh time/date label every second
-const uint32_t MOON_UPDATE_MS = 60UL * 60UL * 1000UL;  // refetch moon phase hourly once we have a
-                                                        // successful reading (moon age barely moves
-                                                        // minute to minute)
+const uint32_t MOON_UPDATE_MS = 60UL * 60UL * 1000UL;  // refetch hourly after the first successful reading
 const uint32_t MOON_RETRY_MS = 15UL * 1000UL;          // retry this often until the FIRST fetch succeeds
 
 static uint32_t lastClockMillis = 0;
@@ -105,7 +103,6 @@ String htmlEscape(const String &value);
 bool waitForTimeSync(uint32_t timeoutMs);
 void updateClockLabels();
 void updateMoonData();
-void updateMoonRiseSet();
 String getMoonPhase(double age);
 int getMoonImageIndex(double age);
 void setMoonImage(int index);
@@ -168,7 +165,6 @@ void setup()
     configTzTime(deviceConfig.timezone.c_str(), NTP_SERVER);
     waitForTimeSync(15000); 
     updateMoonData();
-    updateMoonRiseSet();
     lastClockMillis = millis();
     lastMoonMillis = millis();
     Serial.println("Setup complete.");
@@ -186,7 +182,6 @@ void loop()
     if (now - lastMoonMillis >= (moonDataValid ? MOON_UPDATE_MS : MOON_RETRY_MS)) {
         lastMoonMillis = now;
         updateMoonData();
-        updateMoonRiseSet();
     }
 
     delay(5);
@@ -425,72 +420,6 @@ void playMoonIntroAnimation()
     }
 }
 
-void updateMoonData()
-{
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("WiFi not connected. Skipping moon data fetch.");
-        return;
-    }
-
-    time_t now;
-    struct tm timeinfo;
-    time(&now);
-    localtime_r(&now, &timeinfo);
-
-    if (timeinfo.tm_year < (2023 - 1900)) {
-        Serial.println("Time not set yet. Skipping moon data fetch.");
-        return;
-    }
-
-    char dateStr[25];
-    if (strftime(dateStr, sizeof(dateStr), "%Y-%m-%dT%H:%M", &timeinfo) == 0) {
-        Serial.println("Failed to format date string.");
-        return;
-    }
-
-    String url = "https://svs.gsfc.nasa.gov/api/dialamoon/";
-    url += dateStr;
-
-    Serial.print("Fetching moon data: ");
-    Serial.println(url);
-
-    WiFiClientSecure client;
-    client.setInsecure();
-
-    HTTPClient http;
-    http.begin(client, url);
-    int httpCode = http.GET();
-
-    if (httpCode == HTTP_CODE_OK) {
-        String payload = http.getString();
-
-        DynamicJsonDocument doc(2048);
-        DeserializationError err = deserializeJson(doc, payload);
-        if (err) {
-            Serial.print("JSON parse failed: ");
-            Serial.println(err.c_str());
-            http.end();
-            return;
-        }
-
-        double age = doc["age"].as<double>();
-        Serial.printf("Moon age: %.3f days\n", age);
-
-        String phaseName = getMoonPhase(age);
-        lv_label_set_text(ui_phase, phaseName.c_str());
-        lv_obj_invalidate(ui_phase);
-        lv_refr_now(NULL);
-
-        setMoonImage(getMoonImageIndex(age));
-        moonDataValid = true;
-
-    } else {
-        Serial.printf("Failed to fetch moon data, HTTP code: %d\n", httpCode);
-    }
-
-    http.end();
-}
-
 String getMoonPhase(double age)
 {
     if (age < 1.84566) return "New Moon";
@@ -512,13 +441,13 @@ int getMoonImageIndex(double age)
     return idx;
 }
 
-// Fetches today's moonrise/moonset for the configured location from MET Norway's free
-// Sunrise/Moon API (no API key needed) and updates ui_moon_times.
+// Fetches today's moon phase and moonrise/moonset from MET Norway's free
+// Sunrise/Moon API (no API key needed).
 // Docs: https://api.met.no/weatherapi/sunrise/3.0/documentation
-void updateMoonRiseSet()
+void updateMoonData()
 {
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("WiFi not connected. Skipping moonrise/set fetch.");
+        Serial.println("WiFi not connected. Skipping moon data fetch.");
         return;
     }
 
@@ -528,7 +457,7 @@ void updateMoonRiseSet()
     localtime_r(&now, &timeinfo);
 
     if (timeinfo.tm_year < (2023 - 1900)) {
-        Serial.println("Time not set yet. Skipping moonrise/set fetch.");
+        Serial.println("Time not set yet. Skipping moon data fetch.");
         return;
     }
 
@@ -559,20 +488,28 @@ void updateMoonRiseSet()
     url += "&date=";
     url += dateStr;
     url += "&offset=";
-    url += offsetStr;
+    if (offsetStr[0] == '+') {
+        url += "%2B";
+        url += offsetStr + 1;
+    } else {
+        url += offsetStr;
+    }
 
-    Serial.print("Fetching moonrise/set: ");
+    Serial.print("Fetching moon phase and moonrise/set: ");
     Serial.println(url);
 
     WiFiClientSecure client;
     client.setInsecure();
 
     HTTPClient http;
-    http.begin(client, url);
+    if (!http.begin(client, url)) {
+        Serial.println("Failed to initialize moon data request.");
+        return;
+    }
     // MET Norway's terms of service ask every client to identify itself --
     // put your own app name / a contact address here.
     // See https://api.met.no/doc/TermsOfService
-    http.addHeader("User-Agent", "MoonPhaseClock/1.0 (your-email@example.com)");
+    http.addHeader("User-Agent", "MoonPhaseClock/1.0 (vk3iz.usa@gmail.com)");
 
     int httpCode = http.GET();
 
@@ -582,10 +519,28 @@ void updateMoonRiseSet()
         DynamicJsonDocument doc(2048);
         DeserializationError err = deserializeJson(doc, payload);
         if (err) {
-            Serial.print("Moonrise/set JSON parse failed: ");
+            Serial.print("Moon data JSON parse failed: ");
             Serial.println(err.c_str());
             http.end();
             return;
+        }
+
+        JsonVariantConst phaseValue = doc["properties"]["moonphase"];
+        if (phaseValue.is<double>()) {
+            double phase = phaseValue.as<double>();
+            if (isfinite(phase) && phase >= 0.0 && phase <= 360.0) {
+                double age = (phase == 360.0 ? 0.0 : phase) / 360.0 * 29.53;
+                Serial.printf("Daily moon phase: %.2f degrees\n", phase);
+                String phaseName = getMoonPhase(age);
+                lv_label_set_text(ui_phase, phaseName.c_str());
+                lv_obj_invalidate(ui_phase);
+                setMoonImage(getMoonImageIndex(age));
+                moonDataValid = true;
+            } else {
+                Serial.println("Invalid moon phase in MET Norway response.");
+            }
+        } else {
+            Serial.println("Missing or non-numeric moon phase in MET Norway response.");
         }
 
         const char *riseTime = doc["properties"]["moonrise"]["time"] | (const char *)nullptr;
@@ -614,7 +569,8 @@ void updateMoonRiseSet()
         lv_refr_now(NULL);
 
     } else {
-        Serial.printf("Failed to fetch moonrise/set, HTTP code: %d\n", httpCode);
+        Serial.printf("Failed to fetch moon data, HTTP code: %d (%s)\n",
+                      httpCode, http.errorToString(httpCode).c_str());
     }
 
     http.end();
