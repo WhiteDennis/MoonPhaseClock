@@ -103,6 +103,7 @@ String htmlEscape(const String &value);
 bool waitForTimeSync(uint32_t timeoutMs);
 void updateClockLabels();
 void updateMoonData();
+void setMoonPhaseLabel(const char *text);
 String getMoonPhase(double age);
 int getMoonImageIndex(double age);
 void setMoonImage(int index);
@@ -441,6 +442,13 @@ int getMoonImageIndex(double age)
     return idx;
 }
 
+void setMoonPhaseLabel(const char *text)
+{
+    lv_label_set_text(ui_phase, text);
+    lv_obj_invalidate(ui_phase);
+    lv_refr_now(NULL);
+}
+
 // Fetches today's moon phase and moonrise/moonset from MET Norway's free
 // Sunrise/Moon API (no API key needed).
 // Docs: https://api.met.no/weatherapi/sunrise/3.0/documentation
@@ -448,6 +456,7 @@ void updateMoonData()
 {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("WiFi not connected. Skipping moon data fetch.");
+        setMoonPhaseLabel("API Fail");
         return;
     }
 
@@ -458,6 +467,7 @@ void updateMoonData()
 
     if (timeinfo.tm_year < (2023 - 1900)) {
         Serial.println("Time not set yet. Skipping moon data fetch.");
+        setMoonPhaseLabel("API Fail");
         return;
     }
 
@@ -504,12 +514,13 @@ void updateMoonData()
     HTTPClient http;
     if (!http.begin(client, url)) {
         Serial.println("Failed to initialize moon data request.");
+        setMoonPhaseLabel("API Fail");
         return;
     }
     // MET Norway's terms of service ask every client to identify itself --
     // put your own app name / a contact address here.
     // See https://api.met.no/doc/TermsOfService
-    http.addHeader("User-Agent", "MoonPhaseClock/1.0 (vk3iz.usa@gmail.com)");
+    http.addHeader("User-Agent", "MoonPhaseClock/1.0 (Add a valid email name)");
 
     int httpCode = http.GET();
 
@@ -521,6 +532,7 @@ void updateMoonData()
         if (err) {
             Serial.print("Moon data JSON parse failed: ");
             Serial.println(err.c_str());
+            setMoonPhaseLabel("API Fail");
             http.end();
             return;
         }
@@ -532,15 +544,16 @@ void updateMoonData()
                 double age = (phase == 360.0 ? 0.0 : phase) / 360.0 * 29.53;
                 Serial.printf("Daily moon phase: %.2f degrees\n", phase);
                 String phaseName = getMoonPhase(age);
-                lv_label_set_text(ui_phase, phaseName.c_str());
-                lv_obj_invalidate(ui_phase);
+                setMoonPhaseLabel(phaseName.c_str());
                 setMoonImage(getMoonImageIndex(age));
                 moonDataValid = true;
             } else {
                 Serial.println("Invalid moon phase in MET Norway response.");
+                setMoonPhaseLabel("API Fail");
             }
         } else {
             Serial.println("Missing or non-numeric moon phase in MET Norway response.");
+            setMoonPhaseLabel("API Fail");
         }
 
         const char *riseTime = doc["properties"]["moonrise"]["time"] | (const char *)nullptr;
@@ -571,6 +584,7 @@ void updateMoonData()
     } else {
         Serial.printf("Failed to fetch moon data, HTTP code: %d (%s)\n",
                       httpCode, http.errorToString(httpCode).c_str());
+        setMoonPhaseLabel("API Fail");
     }
 
     http.end();
