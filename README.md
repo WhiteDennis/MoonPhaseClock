@@ -15,7 +15,7 @@ Modified with Claude.ai to add Moon Rise/Set time
 - First-boot Wi-Fi and MET Norway contact setup through a local access point
 - Automatic IP-based location and time-zone lookup
 - Local network page for viewing or overriding location and time zone
-- Optional nighttime auto-dimming of display colors
+- Nighttime auto-dimming of display colors, enabled by default
 - Moon images automatically rotate 180° for locations south of the equator
 
 ## Hardware
@@ -37,6 +37,8 @@ Modified with Claude.ai to add Moon Rise/Set time
 
 ## Setup Instructions
 
+You can flash a prebuilt image with the [online web installer](https://zinfandel22.github.io/MoonPhaseClock/) instead of building with PlatformIO; see [Web installer](#web-installer).
+
 1. **Open the project** in PlatformIO (VS Code extension).
 2. **Wire the display** to your board per the table above. `SDA` and `SCL` on the display are used as SPI MOSI and SCK, not as I²C signals.
 3. **Build and upload** using PlatformIO. Select `esp32dev` for NodeMCU-32S or `xiao_esp32c3` for XIAO ESP32-C3. A default build compiles both environments; select the correct one when uploading. On the command line, use `pio run -e esp32dev -t upload` or `pio run -e xiao_esp32c3 -t upload`.
@@ -55,13 +57,13 @@ On startup, the clock sends one HTTPS request to [ipwho.is](https://ipwhois.io/d
 
 The clock caches the last successful automatic result for the current Wi-Fi network. If lookup fails, it uses that cache and retries after five minutes; rate-limit responses may delay the retry. If there is no cache, it displays **Location error** and waits for a successful lookup. Errors are also reported in the Serial Monitor. Manual locations from older firmware versions are not migrated. The service's free tier has usage limits, and changes to its certificates or time-zone data may require a firmware update.
 
-## Network location settings
+## Network location and display settings
 
 After connecting to Wi-Fi, the clock displays its assigned IP address for 10 seconds, including after a reconnection. From a device on the same network, open `http://<clock-ip>/` to view its current latitude, longitude, and IANA time zone. The address is also printed in the Serial Monitor; if it changes, use the new address.
 
 To override automatic detection, select **Manual location and time zone**, enter decimal coordinates and a supported IANA name such as `Australia/Sydney` or `America/Los_Angeles`, and save. The clock restarts and retains the override until you select **Automatic IP-based location** and save again. Manual mode skips the IP lookup. A cached location from an older firmware may show an empty time-zone name until the next successful lookup.
 
-The display section also lets you enable or disable auto-dimming without changing the location settings. When enabled, the clock scales rendered RGB colors to approximately 50% from **10:00 p.m. until 8:00 a.m.** local time. It returns to full color outside those hours. Dimming starts only after the clock has a valid time and time zone; the always-on backlight itself is not controlled. Existing installations default to auto-dim enabled.
+In the **Display** section, check or uncheck auto-dimming and select **Save display setting**. This saves independently of the location settings and does not restart the clock. When enabled, the clock scales rendered RGB colors to approximately 50% from **10:00 p.m. until 8:00 a.m.** local time. It returns to full color outside those hours. Dimming starts only after the clock has a valid time and time zone; the always-on backlight itself is not controlled. Existing installations default to auto-dim enabled.
 
 The network settings page uses unencrypted HTTP and has no password. Anyone on the local network can view or change these settings; use it only on a trusted network.
 
@@ -75,7 +77,7 @@ Flash a merged image at offset **`0x0`** using a flashing tool compatible with t
 
 ## Web installer
 
-The included `index.html` uses ESP Web Tools to flash the staged images. Serve the project root over HTTPS (for example, with GitHub Pages if enabled), or locally with `python -m http.server 8000` and open `http://localhost:8000/`. Opening the HTML file directly is not sufficient. An internet connection is needed to load ESP Web Tools.
+The [online web installer](https://zinfandel22.github.io/MoonPhaseClock/) uses ESP Web Tools to flash the staged images. To run the included `index.html` yourself, serve the project root over HTTPS or locally with `python -m http.server 8000` and open `http://localhost:8000/`. Opening the HTML file directly is not sufficient. An internet connection is needed to load ESP Web Tools.
 
 Use a Web Serial-compatible browser such as Chrome or Edge, connect the board by USB, check the wiring shown on the page, and click **Connect**. The installer detects the chip family and selects the corresponding image; the board selector only highlights the wiring and does not choose the firmware. After flashing, follow the setup access point instructions above. Flashing through the installer overwrites saved settings, as described above.
 
