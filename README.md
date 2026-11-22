@@ -12,44 +12,43 @@ Modified with Claude.ai to add Moon Rise/Set time
 - Daily moon phase name + matching moon image, pulled from MET Norway's Sunrise API
 - Built with LVGL 8.3.11 UI designed in SquareLine Studio
 - Moon rise and Moon set time displayed
-- First-boot Wi-Fi, location, and time-zone setup through a local access point
+- First-boot Wi-Fi, location, time-zone, and MET Norway contact setup through a local access point
 - Moon images automatically rotate 180° for locations south of the equator
 
 ## Hardware
 
-- Seeed Studio XIAO ESP32C3
+- ESP32S NodeMCU (NodeMCU-32S) or Seeed Studio XIAO ESP32-C3
 - GC9A01 240×240 round SPI display
 
 ## Wiring
 
-| GC9A01 Pin | XIAO Pin | ESP32-C3 GPIO |
+| GC9A01 Pin | NodeMCU-32S GPIO | XIAO ESP32-C3 pin (GPIO) |
 |---|---|---|
-| SDA / MOSI | D4 | 6 |
-| SCL / SCK | D5 | 7 |
-| CS | D2 | 4 |
-| DC | D3 | 5 |
-| RST | D1 | 3 |
-| BL | Not connected (always on) | — |
-| MISO | Not connected | — |
+| SDA / MOSI | 23 | D4 (6) |
+| SCL / SCK | 18 | D5 (7) |
+| CS | 22 | D2 (4) |
+| DC | 21 | D3 (5) |
+| RST | 27 | D1 (3) |
+| BL | Not connected (always on) | Not connected (always on) |
+| MISO | Not connected | Not connected |
 
 ## Setup Instructions
 
 1. **Open the project** in PlatformIO (VS Code extension).
-2. **Wire the display** to the XIAO ESP32C3 per the table above. `SDA` and `SCL` on the display are used as SPI MOSI and SCK, not as I²C signals.
-3. **Build and upload** using PlatformIO. The `esp32dev` environment targets the XIAO ESP32C3 and is configured for the GC9A01 display.
+2. **Wire the display** to your board per the table above. `SDA` and `SCL` on the display are used as SPI MOSI and SCK, not as I²C signals.
+3. **Build and upload** using PlatformIO. Select `esp32dev` for NodeMCU-32S or `xiao_esp32c3` for XIAO ESP32-C3. The default is `esp32dev`. On the command line, use `pio run -e esp32dev -t upload` or `pio run -e xiao_esp32c3 -t upload`.
 4. **Open the Serial Monitor** at 115200 baud and reset the board. On first boot, the clock prints the setup access point name.
 5. **Connect a phone or computer** to that open access point; no password is needed. If the setup page does not open automatically, browse to `http://192.168.4.1`.
-6. **Enter the network and location settings.** Use decimal latitude and longitude; a negative latitude automatically rotates the moon images 180° for the Southern Hemisphere. The time-zone field takes a POSIX TZ rule, for example `PST8PDT,M3.2.0,M11.1.0`. Leave the Wi-Fi password blank only for an open network; WPA passwords must be 8 to 63 characters.
+6. **Enter the network, location, and contact settings.** Use decimal latitude and longitude; a negative latitude automatically rotates the moon images 180° for the Southern Hemisphere. The time-zone field takes a POSIX TZ rule, for example `PST8PDT,M3.2.0,M11.1.0`. Leave the Wi-Fi password blank only for an open network; WPA passwords must be 8 to 63 characters. Enter an email address for MET Norway to contact you; it is sent in the API request's `User-Agent` header.
 7. **Save and connect.** The clock saves settings in ESP32 nonvolatile storage, restarts, connects to Wi-Fi, syncs time via NTP, and fetches the daily moon phase.
-8. **Set the MET Norway contact address** by replacing `your-email@example.com` in `src/main.cpp` before sharing or deploying the project.
 
-The setup access point starts when no settings have been saved or when the saved Wi-Fi network cannot be reached. If connection fails, the form retains the saved location and time zone; enter the Wi-Fi password again. Saved settings do not require editing `include/credentials.h`.
+The setup access point starts when no settings have been saved, when a saved contact email is missing or invalid, or when the saved Wi-Fi network cannot be reached. After upgrading from a version without a contact email, connect to the setup access point and enter the email and Wi-Fi password; the saved network name, location, and time zone are retained. If connection fails, the form retains the saved location, time zone, and contact email; enter the Wi-Fi password again. Saved settings do not require editing `include/credentials.h`.
 
 The setup access point is open and does not encrypt traffic. Provision the clock only in a trusted location, then disconnect from the setup network after configuration.
 
 ## Create a merged flash image
 
-Run `pio run -e esp32dev -t merge` from the project directory. PlatformIO builds the firmware and creates `.pio/build/esp32dev/firmware-merged.bin`, containing the bootloader, partition table, boot data, and application. Flash this file at offset **`0x0`** using an ESP32-C3-compatible flashing tool.
+The merged image is created automatically as part of a standard PlatformIO build. From the project directory, run `pio run -e esp32dev` or `pio run -e xiao_esp32c3`; PlatformIO creates `.pio/build/<environment>/firmware-merged.bin`, containing the bootloader, partition table, boot data, and application. Flash this file at offset **`0x0`** using a flashing tool compatible with the selected board. You can also run `pio run -e <environment> -t merge` to build the merged image explicitly.
 
 **Warning:** Flashing the merged image also overwrites the gaps between its components, including the saved Wi-Fi and location settings. The clock will need to be configured again. Use the normal PlatformIO upload to retain those settings.
 

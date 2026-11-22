@@ -1,6 +1,6 @@
 /**
  * Moon Phase
- * Seeed Studio XIAO ESP32C3 + GC9A01 240x240 round (SPI, TFT_eSPI) + LVGL 8.3.11
+ * ESP32S NodeMCU or XIAO ESP32-C3 + GC9A01 240x240 round (SPI, TFT_eSPI) + LVGL 8.3.11
  * Credit to nishad2m8 https://github.com/nishad2m8
  * What this does:
  *  - Connects to WiFi, syncs time via NTP
@@ -9,7 +9,7 @@
  *    and updates the phase name label + moon image accordingly
  *
  * NOTE: TFT pin mapping lives in platformio.ini build_flags.
- * Configure Wi-Fi, location, and time zone through the setup access point on first boot.
+ * Configure Wi-Fi, location, time zone, and MET Norway contact through the setup access point.
  */
 
 #include <Arduino.h>
@@ -35,6 +35,7 @@ struct DeviceConfig {
     String ssid;
     String password;
     String timezone;
+    String contactEmail;
     double latitude;
     double longitude;
 };
@@ -90,11 +91,14 @@ static bool moonDataValid = false;
 // (Not part of the SquareLine Studio export, so it's safe from re-exports.)
 static lv_obj_t *ui_moon_times = NULL;
 static lv_obj_t *ui_time_period = NULL;
+static const lv_point_t moonriseArrowPoints[] = {{0, 4}, {4, 0}, {8, 4}, {4, 0}, {4, 11}};
+static const lv_point_t moonsetArrowPoints[] = {{4, 0}, {4, 11}, {0, 7}, {4, 11}, {8, 7}};
 
 // ---- Forward declarations ----
 bool loadDeviceConfig();
 bool saveDeviceConfig(const DeviceConfig &config);
 bool isValidConfig(const DeviceConfig &config);
+bool isValidContactEmail(const String &email);
 bool connectToWiFi();
 void startProvisioningPortal();
 void handleConfigurationSave();
@@ -145,7 +149,21 @@ void setup()
     lv_obj_set_style_text_opa(ui_moon_times, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_align(ui_moon_times, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_moon_times, &ui_font_datefont, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_label_set_text(ui_moon_times, "^ --:--\nv --:--");
+    lv_label_set_text(ui_moon_times, "   --:--\n   --:--");
+
+    lv_obj_t *moonriseArrow = lv_line_create(ui_moon_times);
+    lv_line_set_points(moonriseArrow, moonriseArrowPoints, 5);
+    lv_obj_set_style_line_color(moonriseArrow, lv_color_hex(0xDBDBDB), LV_PART_MAIN);
+    lv_obj_set_style_line_width(moonriseArrow, 2, LV_PART_MAIN);
+    lv_obj_align(moonriseArrow, LV_ALIGN_TOP_LEFT, 1, 3);
+
+    lv_obj_t *moonsetArrow = lv_line_create(ui_moon_times);
+    lv_line_set_points(moonsetArrow, moonsetArrowPoints, 5);
+    lv_obj_set_style_line_color(moonsetArrow, lv_color_hex(0xDBDBDB), LV_PART_MAIN);
+    lv_obj_set_style_line_width(moonsetArrow, 2, LV_PART_MAIN);
+    lv_obj_align(moonsetArrow, LV_ALIGN_TOP_LEFT, 1,
+                 3 + lv_font_get_line_height(&ui_font_datefont) +
+                 lv_obj_get_style_text_line_space(ui_moon_times, LV_PART_MAIN));
 
     bool hasDeviceConfig = loadDeviceConfig();
     if (hasDeviceConfig) {
@@ -198,6 +216,7 @@ bool loadDeviceConfig()
         deviceConfig.ssid = preferences.getString("ssid", "");
         deviceConfig.password = preferences.getString("password", "");
         deviceConfig.timezone = preferences.getString("timezone", "");
+        deviceConfig.contactEmail = preferences.getString("contactEmail", "");
         deviceConfig.latitude = preferences.getDouble("latitude", 0.0);
         deviceConfig.longitude = preferences.getDouble("longitude", 0.0);
     }
@@ -210,6 +229,10 @@ bool saveDeviceConfig(const DeviceConfig &config)
     Preferences preferences;
     if (!preferences.begin(CONFIG_NAMESPACE, false)) return false;
 
+    if (preferences.putString("contactEmail", config.contactEmail) == 0) {
+        preferences.end();
+        return false;
+    }
     preferences.putString("ssid", config.ssid);
     preferences.putString("password", config.password);
     preferences.putString("timezone", config.timezone);
@@ -226,8 +249,37 @@ bool isValidConfig(const DeviceConfig &config)
     return config.ssid.length() > 0 && config.ssid.length() <= 32 &&
            (passwordLength == 0 || (passwordLength >= 8 && passwordLength <= 63)) &&
            config.timezone.length() > 0 && config.timezone.length() <= 63 &&
+           isValidContactEmail(config.contactEmail) &&
            isfinite(config.latitude) && config.latitude >= -90.0 && config.latitude <= 90.0 &&
            isfinite(config.longitude) && config.longitude >= -180.0 && config.longitude <= 180.0;
+}
+
+bool isValidContactEmail(const String &email)
+{
+    if (email.length() == 0 || email.length() > 254) return false;
+    int at = email.indexOf('@');
+    if (at <= 0 || at > 64 || at == (int)email.length() - 1 || email.indexOf('@', at + 1) != -1) return false;
+
+    for (int i = 0; i < at; i++) {
+        char c = email[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || (c != '\0' && strchr(".!#$%&'*+/=?^_`{|}~-", c)))) return false;
+    }
+
+    size_t labelLength = 0;
+    for (size_t i = at + 1; i < email.length(); i++) {
+        char c = email[i];
+        bool alphanumeric = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                            (c >= '0' && c <= '9');
+        if (c == '.') {
+            if (labelLength == 0 || email[i - 1] == '-') return false;
+            labelLength = 0;
+        } else {
+            if ((!alphanumeric && c != '-') || (labelLength == 0 && c == '-')) return false;
+            if (++labelLength > 63) return false;
+        }
+    }
+    return labelLength > 0 && email[email.length() - 1] != '-';
 }
 
 String htmlEscape(const String &value)
@@ -260,7 +312,9 @@ String configurationPage(const String &message)
             "<label for=\"latitude\">Latitude</label><input id=\"latitude\" name=\"latitude\" type=\"number\" step=\"any\" min=\"-90\" max=\"90\" required value=\"" + String(deviceConfig.latitude, 6) + "\">"
             "<label for=\"longitude\">Longitude</label><input id=\"longitude\" name=\"longitude\" type=\"number\" step=\"any\" min=\"-180\" max=\"180\" required value=\"" + String(deviceConfig.longitude, 6) + "\">"
             "<label for=\"timezone\">POSIX time-zone rule</label><input id=\"timezone\" name=\"timezone\" maxlength=\"63\" required value=\"" + htmlEscape(deviceConfig.timezone) + "\">"
-            "<small>Example: PST8PDT,M3.2.0,M11.1.0</small><br><button type=\"submit\">Save and connect</button></form></body></html>";
+            "<small>Example: PST8PDT,M3.2.0,M11.1.0</small>"
+            "<label for=\"contactEmail\">MET Norway contact email</label><input id=\"contactEmail\" name=\"contactEmail\" type=\"email\" maxlength=\"254\" required value=\"" + htmlEscape(deviceConfig.contactEmail) + "\">"
+            "<small>Sent to MET Norway to identify this app in API requests.</small><br><button type=\"submit\">Save and connect</button></form></body></html>";
     return page;
 }
 
@@ -270,6 +324,7 @@ void handleConfigurationSave()
     candidate.ssid = configServer.arg("ssid");
     candidate.password = configServer.arg("password");
     candidate.timezone = configServer.arg("timezone");
+    candidate.contactEmail = configServer.arg("contactEmail");
 
     String latitudeValue = configServer.arg("latitude");
     String longitudeValue = configServer.arg("longitude");
@@ -280,7 +335,7 @@ void handleConfigurationSave()
 
     if (latitudeEnd == latitudeValue.c_str() || *latitudeEnd != '\0' ||
         longitudeEnd == longitudeValue.c_str() || *longitudeEnd != '\0' || !isValidConfig(candidate)) {
-        configServer.send(400, "text/html; charset=utf-8", configurationPage("Please check the network, coordinates, and time-zone rule."));
+        configServer.send(400, "text/html; charset=utf-8", configurationPage("Please check the network, coordinates, time-zone rule, and contact email."));
         return;
     }
     if (!saveDeviceConfig(candidate)) {
@@ -517,10 +572,9 @@ void updateMoonData()
         setMoonPhaseLabel("API Fail");
         return;
     }
-    // MET Norway's terms of service ask every client to identify itself --
-    // put your own app name / a contact address here.
+    // Identify this app with the contact address supplied in the setup portal.
     // See https://api.met.no/doc/TermsOfService
-    http.addHeader("User-Agent", "MoonPhaseClock/1.0 (Add a valid email name)");
+    http.setUserAgent("MoonPhaseClock/1.0 (" + deviceConfig.contactEmail + ")");
 
     int httpCode = http.GET();
 
@@ -576,7 +630,7 @@ void updateMoonData()
         // when you'll see "--:--" rather than a fetch error.
 
         char line[40];
-        snprintf(line, sizeof(line), "^ %s\nv %s", riseStr, setStr);
+        snprintf(line, sizeof(line), "   %s\n   %s", riseStr, setStr);
         lv_label_set_text(ui_moon_times, line);
         lv_obj_invalidate(ui_moon_times);
         lv_refr_now(NULL);

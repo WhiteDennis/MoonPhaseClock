@@ -32,6 +32,7 @@ def merge_firmware(target, source, env):
 
 images = [env.subst(image) for _, image in env.get("FLASH_EXTRA_IMAGES", [])]
 images.append(env.subst(os.path.join("$BUILD_DIR", "${PROGNAME}.bin")))
+env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", merge_firmware)
 env.AddCustomTarget(
     name="merge",
     dependencies=images,
