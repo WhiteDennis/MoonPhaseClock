@@ -36,7 +36,7 @@ Modified with Claude.ai to add Moon Rise/Set time
 
 1. **Open the project** in PlatformIO (VS Code extension).
 2. **Wire the display** to your board per the table above. `SDA` and `SCL` on the display are used as SPI MOSI and SCK, not as I²C signals.
-3. **Build and upload** using PlatformIO. Select `esp32dev` for NodeMCU-32S or `xiao_esp32c3` for XIAO ESP32-C3. The default is `esp32dev`. On the command line, use `pio run -e esp32dev -t upload` or `pio run -e xiao_esp32c3 -t upload`.
+3. **Build and upload** using PlatformIO. Select `esp32dev` for NodeMCU-32S or `xiao_esp32c3` for XIAO ESP32-C3. A default build compiles both environments; select the correct one when uploading. On the command line, use `pio run -e esp32dev -t upload` or `pio run -e xiao_esp32c3 -t upload`.
 4. **Open the Serial Monitor** at 115200 baud and reset the board. On first boot, the clock prints the setup access point name.
 5. **Connect a phone or computer** to that open access point; no password is needed. If the setup page does not open automatically, browse to `http://192.168.4.1`.
 6. **Enter the network, location, and contact settings.** Use decimal latitude and longitude; a negative latitude automatically rotates the moon images 180° for the Southern Hemisphere. The time-zone field takes a POSIX TZ rule, for example `PST8PDT,M3.2.0,M11.1.0`. Leave the Wi-Fi password blank only for an open network; WPA passwords must be 8 to 63 characters. Enter an email address for MET Norway to contact you; it is sent in the API request's `User-Agent` header.
@@ -48,9 +48,17 @@ The setup access point is open and does not encrypt traffic. Provision the clock
 
 ## Create a merged flash image
 
-The merged image is created automatically as part of a standard PlatformIO build. From the project directory, run `pio run -e esp32dev` or `pio run -e xiao_esp32c3`; PlatformIO creates `.pio/build/<environment>/firmware-merged.bin`, containing the bootloader, partition table, boot data, and application. Flash this file at offset **`0x0`** using a flashing tool compatible with the selected board. You can also run `pio run -e <environment> -t merge` to build the merged image explicitly.
+Run `pio run` to build both environments, or `pio run -e esp32dev` / `pio run -e xiao_esp32c3` to build one. When firmware is built, PlatformIO creates `.pio/build/<environment>/firmware-merged.bin`, containing the bootloader, partition table, boot data, and application, and copies it to `firmware/<environment>.bin` for the web installer. If the staged files are missing or need refreshing without a rebuild, run `pio run -t merge` for both, or `pio run -e <environment> -t merge` for one.
+
+Flash a merged image at offset **`0x0`** using a flashing tool compatible with the selected board.
 
 **Warning:** Flashing the merged image also overwrites the gaps between its components, including the saved Wi-Fi and location settings. The clock will need to be configured again. Use the normal PlatformIO upload to retain those settings.
+
+## Web installer
+
+The included `index.html` uses ESP Web Tools to flash the staged images. Serve the project root over HTTPS (for example, with GitHub Pages if enabled), or locally with `python -m http.server 8000` and open `http://localhost:8000/`. Opening the HTML file directly is not sufficient. An internet connection is needed to load ESP Web Tools.
+
+Use a Web Serial-compatible browser such as Chrome or Edge, connect the board by USB, check the wiring shown on the page, and click **Connect**. The installer detects the chip family and selects the corresponding image; the board selector only highlights the wiring and does not choose the firmware. After flashing, follow the setup access point instructions above. Flashing through the installer overwrites saved settings, as described above.
 
 ## How It Works
 

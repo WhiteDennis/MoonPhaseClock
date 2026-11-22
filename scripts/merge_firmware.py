@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 
 Import("env")
@@ -28,6 +29,15 @@ def merge_firmware(target, source, env):
     command.extend([env.subst("$ESP32_APP_OFFSET"), env.subst(os.path.join("$BUILD_DIR", "${PROGNAME}.bin"))])
     subprocess.check_call(command)
     print("Merged firmware: {}".format(output))
+
+    # Stage the merged binary into <project_root>/firmware/<env_name>.bin
+    project_dir = env.subst("$PROJECT_DIR")
+    env_name = env.subst("$PIOENV")
+    web_firmware_dir = os.path.join(project_dir, "firmware")
+    os.makedirs(web_firmware_dir, exist_ok=True)
+    staged_output = os.path.join(web_firmware_dir, f"{env_name}.bin")
+    shutil.copy2(output, staged_output)
+    print("Staged web flasher firmware: {}".format(staged_output))
 
 
 images = [env.subst(image) for _, image in env.get("FLASH_EXTRA_IMAGES", [])]
