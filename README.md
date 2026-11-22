@@ -15,6 +15,7 @@ Modified with Claude.ai to add Moon Rise/Set time
 - First-boot Wi-Fi and MET Norway contact setup through a local access point
 - Automatic IP-based location and time-zone lookup
 - Local network page for viewing or overriding location and time zone
+- Optional nighttime auto-dimming of display colors
 - Moon images automatically rotate 180° for locations south of the equator
 
 ## Hardware
@@ -41,7 +42,7 @@ Modified with Claude.ai to add Moon Rise/Set time
 3. **Build and upload** using PlatformIO. Select `esp32dev` for NodeMCU-32S or `xiao_esp32c3` for XIAO ESP32-C3. A default build compiles both environments; select the correct one when uploading. On the command line, use `pio run -e esp32dev -t upload` or `pio run -e xiao_esp32c3 -t upload`.
 4. **Open the Serial Monitor** at 115200 baud and reset the board. On first boot, the clock prints the setup access point name.
 5. **Connect a phone or computer** to that open access point; no password is needed. If the setup page does not open automatically, browse to `http://192.168.4.1`.
-6. **Enter the network and contact settings.** Leave the Wi-Fi password blank only for an open network; WPA passwords must be 8 to 63 characters. Enter an email address for MET Norway to contact you; it is sent in the API request's `User-Agent` header.
+6. **Enter the network and contact settings.** Leave the Wi-Fi password blank only for an open network; WPA passwords must be 8 to 63 characters. Enter an email address for MET Norway to contact you; it is sent in the API request's `User-Agent` header. The auto-dim checkbox is enabled by default.
 7. **Save and connect.** The clock saves settings in ESP32 nonvolatile storage, restarts, and connects to Wi-Fi. Its assigned local IP address appears on the display for 10 seconds after connecting and is also printed in the Serial Monitor. It then syncs time via NTP and looks up its approximate location and time zone before fetching the daily moon phase.
 
 The setup access point starts when no settings have been saved, when a saved contact email is missing or invalid, or when the saved Wi-Fi network cannot be reached. After upgrading from a version without a contact email, connect to the setup access point and enter the email and Wi-Fi password; the saved network name is retained. If connection fails, the form retains the saved network name and contact email; enter the Wi-Fi password again. Saved settings do not require editing `include/credentials.h`.
@@ -59,6 +60,8 @@ The clock caches the last successful automatic result for the current Wi-Fi netw
 After connecting to Wi-Fi, the clock displays its assigned IP address for 10 seconds, including after a reconnection. From a device on the same network, open `http://<clock-ip>/` to view its current latitude, longitude, and IANA time zone. The address is also printed in the Serial Monitor; if it changes, use the new address.
 
 To override automatic detection, select **Manual location and time zone**, enter decimal coordinates and a supported IANA name such as `Australia/Sydney` or `America/Los_Angeles`, and save. The clock restarts and retains the override until you select **Automatic IP-based location** and save again. Manual mode skips the IP lookup. A cached location from an older firmware may show an empty time-zone name until the next successful lookup.
+
+The display section also lets you enable or disable auto-dimming without changing the location settings. When enabled, the clock scales rendered RGB colors to approximately 50% from **10:00 p.m. until 8:00 a.m.** local time. It returns to full color outside those hours. Dimming starts only after the clock has a valid time and time zone; the always-on backlight itself is not controlled. Existing installations default to auto-dim enabled.
 
 The network settings page uses unencrypted HTTP and has no password. Anyone on the local network can view or change these settings; use it only on a trusted network.
 

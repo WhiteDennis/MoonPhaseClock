@@ -43,6 +43,7 @@ struct DeviceConfig {
     String timezone;
     String timezoneId;
     String contactEmail;
+    bool autoDim = true;
     double latitude;
     double longitude;
 };
@@ -64,11 +65,19 @@ static const char *GEOLOCATION_URL = "https://ipwho.is/?fields=success,message,l
 static lv_disp_draw_buf_t draw_buf;
 static lv_color_t buf1[240 * 40];
 static lv_disp_drv_t disp_drv;
+static bool displayDimmed = false;
+static_assert(LV_COLOR_DEPTH == 16 && LV_COLOR_16_SWAP == 0, "Display dimming requires unswapped RGB565 colors.");
 
 static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
 {
     uint32_t w = (area->x2 - area->x1 + 1);
     uint32_t h = (area->y2 - area->y1 + 1);
+
+    if (displayDimmed) {
+        for (uint32_t i = 0; i < w * h; i++) {
+            color_p[i].full = (color_p[i].full >> 1) & 0x7BEF;
+        }
+    }
 
     tft.startWrite();
     tft.setAddrWindow(area->x1, area->y1, w, h);
@@ -100,6 +109,7 @@ const uint64_t GEOLOCATION_RETRY_MS = 5ULL * 60ULL * 1000ULL;
 
 static uint32_t lastClockMillis = 0;
 static uint32_t lastMoonMillis = 0;
+static uint32_t lastAutoDimCheckMillis = 0;
 static bool moonDataValid = false;
 static bool locationValid = false;
 static bool geolocationPending = true;
@@ -127,16 +137,22 @@ bool isValidContactEmail(const String &email);
 bool connectToWiFi();
 void startProvisioningPortal();
 void handleConfigurationSave();
-String configurationPage(const String &message);
+String configurationPage(const String &message, bool autoDim);
 String htmlEscape(const String &value);
+String autoDimCheckbox(bool enabled);
+bool saveAutoDim(bool enabled);
+void updateAutoDim();
+void pollAutoDim();
 bool loadLocationMode();
 bool loadManualLocation();
 bool saveManualLocation(const ManualLocation &location);
 bool useAutomaticLocation();
 void startSettingsServer();
 void handleSettingsSave();
+void handleAutoDimSave();
 String settingsPage(const String &message, const String &mode, const String &latitude,
-                    const String &longitude, const String &timezoneId);
+                    const String &longitude, const String &timezoneId, bool autoDim);
+String currentSettingsPage(const String &message, bool autoDim);
 void showIpAddress();
 void updateIpDisplay();
 bool loadCachedLocation();
@@ -259,11 +275,13 @@ void setup()
     while (showingIp) {
         configServer.handleClient();
         lv_task_handler();
+        pollAutoDim();
         updateIpDisplay();
         delay(5);
     }
 
     waitForTimeSync(15000);
+    updateAutoDim();
     updateGeolocation();
     if (locationValid && (manualLocation || geolocationPending)) updateMoonData();
     lastClockMillis = millis();
@@ -274,6 +292,7 @@ void setup()
 void loop()
 {
     lv_task_handler();
+    pollAutoDim();
     if (ipAddressPending.exchange(false) && WiFi.status() == WL_CONNECTED) {
         configServer.begin();
         showIpAddress();
@@ -310,6 +329,7 @@ bool loadDeviceConfig()
         deviceConfig.password = preferences.getString("password", "");
         deviceConfig.contactEmail = preferences.getString("contactEmail", "");
     }
+    deviceConfig.autoDim = preferences.getBool("autoDim", true);
     preferences.end();
     return configured && isValidConfig(deviceConfig);
 }
@@ -325,6 +345,7 @@ bool saveDeviceConfig(const DeviceConfig &config)
         preferences.putString("password", config.password);
         saved = preferences.isKey("password") &&
                 preferences.getString("password", "") == config.password &&
+                preferences.putBool("autoDim", config.autoDim) > 0 &&
                 preferences.putBool("configured", true) > 0;
     }
     preferences.end();
@@ -383,11 +404,53 @@ String htmlEscape(const String &value)
     return escaped;
 }
 
-String configurationPage(const String &message)
+String autoDimCheckbox(bool enabled)
+{
+    return String("<label for=\"autoDim\"><input id=\"autoDim\" name=\"autoDim\" type=\"checkbox\" value=\"1\"") +
+           (enabled ? " checked" : "") + ">Auto-dim display from 10 p.m. to 8 a.m. local time</label>";
+}
+
+bool saveAutoDim(bool enabled)
+{
+    Preferences preferences;
+    if (!preferences.begin(CONFIG_NAMESPACE, false)) return false;
+    bool saved = preferences.putBool("autoDim", enabled) > 0;
+    preferences.end();
+    return saved;
+}
+
+void updateAutoDim()
+{
+    bool shouldDim = false;
+    if (deviceConfig.autoDim && locationValid) {
+        time_t now;
+        struct tm localTime;
+        time(&now);
+        if (localtime_r(&now, &localTime) && localTime.tm_year >= (2023 - 1900)) {
+            shouldDim = localTime.tm_hour >= 22 || localTime.tm_hour < 8;
+        }
+    }
+    if (shouldDim != displayDimmed) {
+        displayDimmed = shouldDim;
+        lv_obj_invalidate(ui_Screen1);
+        lv_refr_now(NULL);
+    }
+}
+
+void pollAutoDim()
+{
+    uint32_t now = millis();
+    if (now - lastAutoDimCheckMillis >= CLOCK_UPDATE_MS) {
+        lastAutoDimCheckMillis = now;
+        updateAutoDim();
+    }
+}
+
+String configurationPage(const String &message, bool autoDim)
 {
     String page = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
                   "<title>Moon Phase Clock Setup</title><style>body{font:16px sans-serif;max-width:32rem;margin:2rem auto;padding:0 1rem;background:#101820;color:#f2f4f3}"
-                  "label{display:block;margin:1rem 0 .35rem}input{box-sizing:border-box;width:100%;padding:.7rem;font:inherit}button{margin-top:1.2rem;padding:.75rem 1rem;font:inherit}small{color:#c4cfce}</style></head><body>"
+                  "label{display:block;margin:1rem 0 .35rem}input{box-sizing:border-box;width:100%;padding:.7rem;font:inherit}input[type=checkbox]{width:auto;margin-right:.5rem}button{margin-top:1.2rem;padding:.75rem 1rem;font:inherit}small{color:#c4cfce}</style></head><body>"
                   "<h1>Moon Phase Clock</h1><h2>Wi-Fi setup</h2>";
     if (message.length()) page += "<p>" + htmlEscape(message) + "</p>";
     page += "<form method=\"post\" action=\"/save\">"
@@ -396,7 +459,9 @@ String configurationPage(const String &message)
             "<small>Leave blank only if the network is open.</small>"
             "<small>Location and time zone are estimated from your public IP using ipwho.is after connecting.</small>"
             "<label for=\"contactEmail\">MET Norway contact email</label><input id=\"contactEmail\" name=\"contactEmail\" type=\"email\" maxlength=\"254\" required value=\"" + htmlEscape(deviceConfig.contactEmail) + "\">"
-            "<small>Sent to MET Norway to identify this app in API requests.</small><br><button type=\"submit\">Save and connect</button></form></body></html>";
+            "<small>Sent to MET Norway to identify this app in API requests.</small>" +
+            autoDimCheckbox(autoDim) +
+            "<button type=\"submit\">Save and connect</button></form></body></html>";
     return page;
 }
 
@@ -406,13 +471,14 @@ void handleConfigurationSave()
     candidate.ssid = configServer.arg("ssid");
     candidate.password = configServer.arg("password");
     candidate.contactEmail = configServer.arg("contactEmail");
+    candidate.autoDim = configServer.hasArg("autoDim");
 
     if (!isValidConfig(candidate)) {
-        configServer.send(400, "text/html; charset=utf-8", configurationPage("Please check the network and contact email."));
+        configServer.send(400, "text/html; charset=utf-8", configurationPage("Please check the network and contact email.", candidate.autoDim));
         return;
     }
     if (!saveDeviceConfig(candidate)) {
-        configServer.send(500, "text/html; charset=utf-8", configurationPage("Could not save settings. Please try again."));
+        configServer.send(500, "text/html; charset=utf-8", configurationPage("Could not save settings. Please try again.", candidate.autoDim));
         return;
     }
 
@@ -438,7 +504,7 @@ void startProvisioningPortal()
     IPAddress portalIp = WiFi.softAPIP();
     dnsServer.start(DNS_PORT, "*", portalIp);
     configServer.on("/", HTTP_GET, []() {
-        configServer.send(200, "text/html; charset=utf-8", configurationPage(""));
+        configServer.send(200, "text/html; charset=utf-8", configurationPage("", deviceConfig.autoDim));
     });
     configServer.on("/save", HTTP_POST, handleConfigurationSave);
     configServer.onNotFound([]() {
@@ -551,11 +617,11 @@ bool validSettingsHost()
 }
 
 String settingsPage(const String &message, const String &mode, const String &latitude,
-                    const String &longitude, const String &timezoneId)
+                    const String &longitude, const String &timezoneId, bool autoDim)
 {
     String page = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
                   "<title>Moon Phase Clock Location</title><style>body{font:16px sans-serif;max-width:32rem;margin:2rem auto;padding:0 1rem;background:#101820;color:#f2f4f3}"
-                  "label{display:block;margin:1rem 0 .35rem}input,select{box-sizing:border-box;width:100%;padding:.7rem;font:inherit}"
+                  "label{display:block;margin:1rem 0 .35rem}input,select{box-sizing:border-box;width:100%;padding:.7rem;font:inherit}input[type=checkbox]{width:auto;margin-right:.5rem}"
                   "button{margin-top:1.2rem;padding:.75rem 1rem;font:inherit}small{color:#c4cfce}</style></head><body>"
                   "<h1>Moon Phase Clock</h1><h2>Location and time zone</h2>";
     if (message.length()) page += "<p>" + htmlEscape(message) + "</p>";
@@ -571,8 +637,20 @@ String settingsPage(const String &message, const String &mode, const String &lat
             "<label for=\"longitude\">Longitude</label><input id=\"longitude\" name=\"longitude\" inputmode=\"decimal\" value=\"" + htmlEscape(longitude) + "\">"
             "<label for=\"timezone\">IANA time zone</label><input id=\"timezone\" name=\"timezone\" maxlength=\"63\" value=\"" + htmlEscape(timezoneId) + "\">"
             "<small>For manual mode, enter coordinates and a time zone such as Australia/Sydney or America/Los_Angeles. Automatic mode ignores these fields.</small>"
-            "<br><button type=\"submit\">Save and restart</button></form></body></html>";
+            "<br><button type=\"submit\">Save and restart</button></form>"
+            "<h2>Display</h2><form method=\"post\" action=\"/autodim\">"
+            "<input type=\"hidden\" name=\"token\" value=\"" + htmlEscape(settingsToken) + "\">" +
+            autoDimCheckbox(autoDim) +
+            "<button type=\"submit\">Save display setting</button></form></body></html>";
     return page;
+}
+
+String currentSettingsPage(const String &message, bool autoDim)
+{
+    return settingsPage(message, manualLocation ? "manual" : "auto",
+                        locationValid ? String(deviceConfig.latitude, 6) : "",
+                        locationValid ? String(deviceConfig.longitude, 6) : "",
+                        locationValid ? deviceConfig.timezoneId : "", autoDim);
 }
 
 void handleSettingsSave()
@@ -603,7 +681,7 @@ void handleSettingsSave()
             !isfinite(lat) || lat < -90.0 || lat > 90.0 ||
             !isfinite(lon) || lon < -180.0 || lon > 180.0 || !posix || !*posix) {
             configServer.send(400, "text/html; charset=utf-8",
-                              settingsPage("Enter valid coordinates and a supported IANA time zone.", mode, latitude, longitude, timezoneId));
+                              settingsPage("Enter valid coordinates and a supported IANA time zone.", mode, latitude, longitude, timezoneId, deviceConfig.autoDim));
             return;
         }
         ManualLocation location = {};
@@ -613,18 +691,38 @@ void handleSettingsSave()
         saved = saveManualLocation(location);
     } else {
         configServer.send(400, "text/html; charset=utf-8",
-                          settingsPage("Select a valid location source.", mode, latitude, longitude, timezoneId));
+                          settingsPage("Select a valid location source.", mode, latitude, longitude, timezoneId, deviceConfig.autoDim));
         return;
     }
     if (!saved) {
         configServer.send(500, "text/html; charset=utf-8",
-                          settingsPage("Could not save settings. Please try again.", mode, latitude, longitude, timezoneId));
+                          settingsPage("Could not save settings. Please try again.", mode, latitude, longitude, timezoneId, deviceConfig.autoDim));
         return;
     }
 
     configServer.send(200, "text/html; charset=utf-8", "<p>Settings saved. The clock is restarting.</p>");
     delay(750);
     ESP.restart();
+}
+
+void handleAutoDimSave()
+{
+    configServer.sendHeader("Cache-Control", "no-store");
+    configServer.sendHeader("X-Frame-Options", "DENY");
+    configServer.sendHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+    if (!validSettingsHost() || configServer.arg("token") != settingsToken) {
+        configServer.send(403, "text/plain", "Invalid settings request.");
+        return;
+    }
+
+    bool enabled = configServer.hasArg("autoDim");
+    if (!saveAutoDim(enabled)) {
+        configServer.send(500, "text/html; charset=utf-8", currentSettingsPage("Could not save display setting. Please try again.", enabled));
+        return;
+    }
+    deviceConfig.autoDim = enabled;
+    updateAutoDim();
+    configServer.send(200, "text/html; charset=utf-8", currentSettingsPage("Display setting saved.", enabled));
 }
 
 void startSettingsServer()
@@ -642,13 +740,10 @@ void startSettingsServer()
         configServer.sendHeader("Cache-Control", "no-store");
         configServer.sendHeader("X-Frame-Options", "DENY");
         configServer.sendHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
-        configServer.send(200, "text/html; charset=utf-8",
-                          settingsPage("", manualLocation ? "manual" : "auto",
-                                       locationValid ? String(deviceConfig.latitude, 6) : "",
-                                       locationValid ? String(deviceConfig.longitude, 6) : "",
-                                       locationValid ? deviceConfig.timezoneId : ""));
+        configServer.send(200, "text/html; charset=utf-8", currentSettingsPage("", deviceConfig.autoDim));
     });
     configServer.on("/location", HTTP_POST, handleSettingsSave);
+    configServer.on("/autodim", HTTP_POST, handleAutoDimSave);
     configServer.onNotFound([]() {
         configServer.send(404, "text/plain", "Not found.");
     });
@@ -831,6 +926,7 @@ void updateGeolocation()
         deviceConfig = result;
         locationValid = true;
         geolocationPending = false;
+        updateAutoDim();
         if (changed && !saveCachedLocation()) {
             Serial.println("Could not save the geolocation cache.");
         }
