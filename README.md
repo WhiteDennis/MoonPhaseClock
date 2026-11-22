@@ -12,7 +12,9 @@ Modified with Claude.ai to add Moon Rise/Set time
 - Daily moon phase name + matching moon image, pulled from MET Norway's Sunrise API
 - Built with LVGL 8.3.11 UI designed in SquareLine Studio
 - Moon rise and Moon set time displayed
-- First-boot Wi-Fi, location, time-zone, and MET Norway contact setup through a local access point
+- First-boot Wi-Fi and MET Norway contact setup through a local access point
+- Automatic IP-based location and time-zone lookup
+- Local network page for viewing or overriding location and time zone
 - Moon images automatically rotate 180° for locations south of the equator
 
 ## Hardware
@@ -39,12 +41,26 @@ Modified with Claude.ai to add Moon Rise/Set time
 3. **Build and upload** using PlatformIO. Select `esp32dev` for NodeMCU-32S or `xiao_esp32c3` for XIAO ESP32-C3. A default build compiles both environments; select the correct one when uploading. On the command line, use `pio run -e esp32dev -t upload` or `pio run -e xiao_esp32c3 -t upload`.
 4. **Open the Serial Monitor** at 115200 baud and reset the board. On first boot, the clock prints the setup access point name.
 5. **Connect a phone or computer** to that open access point; no password is needed. If the setup page does not open automatically, browse to `http://192.168.4.1`.
-6. **Enter the network, location, and contact settings.** Use decimal latitude and longitude; a negative latitude automatically rotates the moon images 180° for the Southern Hemisphere. The time-zone field takes a POSIX TZ rule, for example `PST8PDT,M3.2.0,M11.1.0`. Leave the Wi-Fi password blank only for an open network; WPA passwords must be 8 to 63 characters. Enter an email address for MET Norway to contact you; it is sent in the API request's `User-Agent` header.
-7. **Save and connect.** The clock saves settings in ESP32 nonvolatile storage, restarts, connects to Wi-Fi, syncs time via NTP, and fetches the daily moon phase.
+6. **Enter the network and contact settings.** Leave the Wi-Fi password blank only for an open network; WPA passwords must be 8 to 63 characters. Enter an email address for MET Norway to contact you; it is sent in the API request's `User-Agent` header.
+7. **Save and connect.** The clock saves settings in ESP32 nonvolatile storage, restarts, and connects to Wi-Fi. Its assigned local IP address appears on the display for 10 seconds after connecting and is also printed in the Serial Monitor. It then syncs time via NTP and looks up its approximate location and time zone before fetching the daily moon phase.
 
-The setup access point starts when no settings have been saved, when a saved contact email is missing or invalid, or when the saved Wi-Fi network cannot be reached. After upgrading from a version without a contact email, connect to the setup access point and enter the email and Wi-Fi password; the saved network name, location, and time zone are retained. If connection fails, the form retains the saved location, time zone, and contact email; enter the Wi-Fi password again. Saved settings do not require editing `include/credentials.h`.
+The setup access point starts when no settings have been saved, when a saved contact email is missing or invalid, or when the saved Wi-Fi network cannot be reached. After upgrading from a version without a contact email, connect to the setup access point and enter the email and Wi-Fi password; the saved network name is retained. If connection fails, the form retains the saved network name and contact email; enter the Wi-Fi password again. Saved settings do not require editing `include/credentials.h`.
 
 The setup access point is open and does not encrypt traffic. Provision the clock only in a trusted location, then disconnect from the setup network after configuration.
+
+## Automatic location
+
+On startup, the clock sends one HTTPS request to [ipwho.is](https://ipwhois.io/documentation) to estimate latitude, longitude, and time zone from its public IP address. The service receives that public IP. IP-based results are approximate and may be incorrect, especially with VPNs, mobile networks, or distant ISP gateways; they determine the moon times, image orientation, and local clock. The returned IANA time zone is converted using the bundled TzDbLookup database, including daylight-saving rules where available.
+
+The clock caches the last successful automatic result for the current Wi-Fi network. If lookup fails, it uses that cache and retries after five minutes; rate-limit responses may delay the retry. If there is no cache, it displays **Location error** and waits for a successful lookup. Errors are also reported in the Serial Monitor. Manual locations from older firmware versions are not migrated. The service's free tier has usage limits, and changes to its certificates or time-zone data may require a firmware update.
+
+## Network location settings
+
+After connecting to Wi-Fi, the clock displays its assigned IP address for 10 seconds, including after a reconnection. From a device on the same network, open `http://<clock-ip>/` to view its current latitude, longitude, and IANA time zone. The address is also printed in the Serial Monitor; if it changes, use the new address.
+
+To override automatic detection, select **Manual location and time zone**, enter decimal coordinates and a supported IANA name such as `Australia/Sydney` or `America/Los_Angeles`, and save. The clock restarts and retains the override until you select **Automatic IP-based location** and save again. Manual mode skips the IP lookup. A cached location from an older firmware may show an empty time-zone name until the next successful lookup.
+
+The network settings page uses unencrypted HTTP and has no password. Anyone on the local network can view or change these settings; use it only on a trusted network.
 
 ## Create a merged flash image
 
@@ -52,7 +68,7 @@ Run `pio run` to build both environments, or `pio run -e esp32dev` / `pio run -e
 
 Flash a merged image at offset **`0x0`** using a flashing tool compatible with the selected board.
 
-**Warning:** Flashing the merged image also overwrites the gaps between its components, including the saved Wi-Fi and location settings. The clock will need to be configured again. Use the normal PlatformIO upload to retain those settings.
+**Warning:** Flashing the merged image also overwrites the gaps between its components, including saved Wi-Fi and location settings. The clock will need to be configured again. Use the normal PlatformIO upload to retain those settings.
 
 ## Web installer
 

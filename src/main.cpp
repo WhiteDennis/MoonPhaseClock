@@ -9,7 +9,7 @@
  *    and updates the phase name label + moon image accordingly
  *
  * NOTE: TFT pin mapping lives in platformio.ini build_flags.
- * Configure Wi-Fi, location, time zone, and MET Norway contact through the setup access point.
+ * Configure Wi-Fi and MET Norway contact through the setup access point.
  */
 
 #include <Arduino.h>
@@ -22,10 +22,16 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <TzDbLookup.h>
+#include <esp_timer.h>
+#include <esp_system.h>
+#include <atomic>
+#include <errno.h>
 #include <math.h>
 #include <stdlib.h>
 #include <time.h>
 #include "ui.h"
+#include "geolocation_ca.h"
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -35,9 +41,16 @@ struct DeviceConfig {
     String ssid;
     String password;
     String timezone;
+    String timezoneId;
     String contactEmail;
     double latitude;
     double longitude;
+};
+
+struct ManualLocation {
+    double latitude;
+    double longitude;
+    char timezoneId[64];
 };
 
 static DeviceConfig deviceConfig;
@@ -45,6 +58,7 @@ static WebServer configServer(80);
 static DNSServer dnsServer;
 static const char *CONFIG_NAMESPACE = "moonclock";
 static const uint16_t DNS_PORT = 53;
+static const char *GEOLOCATION_URL = "https://ipwho.is/?fields=success,message,latitude,longitude,city,timezone.id";
 
 // ---- LVGL display buffer (partial, single buffer, internal RAM only) ----
 static lv_disp_draw_buf_t draw_buf;
@@ -82,15 +96,26 @@ static const lv_img_dsc_t *moon_frames[30] = {
 const uint32_t CLOCK_UPDATE_MS = 1000;                 // refresh time/date label every second
 const uint32_t MOON_UPDATE_MS = 60UL * 60UL * 1000UL;  // refetch hourly after the first successful reading
 const uint32_t MOON_RETRY_MS = 15UL * 1000UL;          // retry this often until the FIRST fetch succeeds
+const uint64_t GEOLOCATION_RETRY_MS = 5ULL * 60ULL * 1000ULL;
 
 static uint32_t lastClockMillis = 0;
 static uint32_t lastMoonMillis = 0;
 static bool moonDataValid = false;
+static bool locationValid = false;
+static bool geolocationPending = true;
+static uint64_t nextGeolocationAttemptMs = 0;
+static bool manualLocation = false;
+static std::atomic<bool> ipAddressPending(false);
+static uint32_t ipShownAt = 0;
+static bool showingIp = false;
+static String settingsToken;
 
 // Extra label added under the clock face for local moonrise/moonset.
 // (Not part of the SquareLine Studio export, so it's safe from re-exports.)
 static lv_obj_t *ui_moon_times = NULL;
 static lv_obj_t *ui_time_period = NULL;
+static lv_obj_t *ui_ip_overlay = NULL;
+static lv_obj_t *ui_ip_label = NULL;
 static const lv_point_t moonriseArrowPoints[] = {{0, 4}, {4, 0}, {8, 4}, {4, 0}, {4, 11}};
 static const lv_point_t moonsetArrowPoints[] = {{4, 0}, {4, 11}, {0, 7}, {4, 11}, {8, 7}};
 
@@ -104,6 +129,21 @@ void startProvisioningPortal();
 void handleConfigurationSave();
 String configurationPage(const String &message);
 String htmlEscape(const String &value);
+bool loadLocationMode();
+bool loadManualLocation();
+bool saveManualLocation(const ManualLocation &location);
+bool useAutomaticLocation();
+void startSettingsServer();
+void handleSettingsSave();
+String settingsPage(const String &message, const String &mode, const String &latitude,
+                    const String &longitude, const String &timezoneId);
+void showIpAddress();
+void updateIpDisplay();
+bool loadCachedLocation();
+bool saveCachedLocation();
+bool fetchLocation(DeviceConfig &result, uint64_t &retryMs);
+bool applyLocation(const DeviceConfig &config);
+void updateGeolocation();
 bool waitForTimeSync(uint32_t timeoutMs);
 void updateClockLabels();
 void updateMoonData();
@@ -130,13 +170,15 @@ void setup()
     lv_disp_drv_register(&disp_drv);
 
     ui_init();
+    lv_label_set_text(ui_time, "--:--:--");
+    lv_label_set_text(ui_date, "-- --- --");
 
     ui_time_period = lv_label_create(ui_Screen1);
     lv_obj_set_width(ui_time_period, LV_SIZE_CONTENT);
     lv_obj_set_height(ui_time_period, LV_SIZE_CONTENT);
     lv_obj_set_style_text_color(ui_time_period, lv_color_hex(0xFFFF00), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_time_period, &ui_font_datefont, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_label_set_text(ui_time_period, "am");
+    lv_label_set_text(ui_time_period, "");
     lv_obj_align_to(ui_time_period, ui_time, LV_ALIGN_OUT_RIGHT_BOTTOM, 2, -2);
 
     ui_moon_times = lv_label_create(ui_Screen1);
@@ -165,11 +207,22 @@ void setup()
                  3 + lv_font_get_line_height(&ui_font_datefont) +
                  lv_obj_get_style_text_line_space(ui_moon_times, LV_PART_MAIN));
 
+    ui_ip_overlay = lv_obj_create(ui_Screen1);
+    lv_obj_set_size(ui_ip_overlay, 240, 240);
+    lv_obj_center(ui_ip_overlay);
+    lv_obj_set_style_bg_color(ui_ip_overlay, lv_color_hex(0x101820), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(ui_ip_overlay, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(ui_ip_overlay, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(ui_ip_overlay, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(ui_ip_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    ui_ip_label = lv_label_create(ui_ip_overlay);
+    lv_obj_set_style_text_color(ui_ip_label, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_text_font(ui_ip_label, &ui_font_datefont, LV_PART_MAIN);
+    lv_obj_set_style_text_align(ui_ip_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_center(ui_ip_label);
+    lv_obj_add_flag(ui_ip_overlay, LV_OBJ_FLAG_HIDDEN);
+
     bool hasDeviceConfig = loadDeviceConfig();
-    if (hasDeviceConfig) {
-        lv_img_set_pivot(ui_img_moon, 50, 50);
-        lv_img_set_angle(ui_img_moon, deviceConfig.latitude < 0.0 ? 1800 : 0);
-    }
 
     lv_task_handler(); 
     playMoonIntroAnimation();
@@ -177,13 +230,42 @@ void setup()
     if (!hasDeviceConfig) {
         startProvisioningPortal();
     }
+    WiFi.onEvent([](WiFiEvent_t) {
+        ipAddressPending.store(true);
+    }, ARDUINO_EVENT_WIFI_STA_GOT_IP);
     if (!connectToWiFi()) {
         startProvisioningPortal();
     }
 
-    configTzTime(deviceConfig.timezone.c_str(), NTP_SERVER);
-    waitForTimeSync(15000); 
-    updateMoonData();
+    configTime(0, 0, NTP_SERVER);
+    if (!loadLocationMode()) {
+        geolocationPending = false;
+    } else if (manualLocation) {
+        geolocationPending = false;
+        locationValid = loadManualLocation();
+    } else {
+        locationValid = loadCachedLocation();
+    }
+    if (locationValid) {
+        Serial.println(manualLocation ? "Using manual location." : "Using last successful IP-based location until refreshed.");
+        locationValid = applyLocation(deviceConfig);
+    }
+    if (!locationValid) {
+        setMoonPhaseLabel("Location error");
+    }
+    startSettingsServer();
+    ipAddressPending.store(false);
+    showIpAddress();
+    while (showingIp) {
+        configServer.handleClient();
+        lv_task_handler();
+        updateIpDisplay();
+        delay(5);
+    }
+
+    waitForTimeSync(15000);
+    updateGeolocation();
+    if (locationValid && (manualLocation || geolocationPending)) updateMoonData();
     lastClockMillis = millis();
     lastMoonMillis = millis();
     Serial.println("Setup complete.");
@@ -192,13 +274,24 @@ void setup()
 void loop()
 {
     lv_task_handler();
+    if (ipAddressPending.exchange(false) && WiFi.status() == WL_CONNECTED) {
+        configServer.begin();
+        showIpAddress();
+    }
+    if (WiFi.status() == WL_CONNECTED) configServer.handleClient();
+    updateIpDisplay();
+    if (showingIp) {
+        delay(5);
+        return;
+    }
+    updateGeolocation();
     uint32_t now = millis();
-    if (now - lastClockMillis >= CLOCK_UPDATE_MS) {
+    if (locationValid && now - lastClockMillis >= CLOCK_UPDATE_MS) {
         lastClockMillis = now;
         updateClockLabels();
     }
 
-    if (now - lastMoonMillis >= (moonDataValid ? MOON_UPDATE_MS : MOON_RETRY_MS)) {
+    if (locationValid && now - lastMoonMillis >= (moonDataValid ? MOON_UPDATE_MS : MOON_RETRY_MS)) {
         lastMoonMillis = now;
         updateMoonData();
     }
@@ -215,10 +308,7 @@ bool loadDeviceConfig()
     if (configured) {
         deviceConfig.ssid = preferences.getString("ssid", "");
         deviceConfig.password = preferences.getString("password", "");
-        deviceConfig.timezone = preferences.getString("timezone", "");
         deviceConfig.contactEmail = preferences.getString("contactEmail", "");
-        deviceConfig.latitude = preferences.getDouble("latitude", 0.0);
-        deviceConfig.longitude = preferences.getDouble("longitude", 0.0);
     }
     preferences.end();
     return configured && isValidConfig(deviceConfig);
@@ -229,18 +319,16 @@ bool saveDeviceConfig(const DeviceConfig &config)
     Preferences preferences;
     if (!preferences.begin(CONFIG_NAMESPACE, false)) return false;
 
-    if (preferences.putString("contactEmail", config.contactEmail) == 0) {
-        preferences.end();
-        return false;
+    bool saved = preferences.putString("contactEmail", config.contactEmail) > 0 &&
+                 preferences.putString("ssid", config.ssid) > 0;
+    if (saved) {
+        preferences.putString("password", config.password);
+        saved = preferences.isKey("password") &&
+                preferences.getString("password", "") == config.password &&
+                preferences.putBool("configured", true) > 0;
     }
-    preferences.putString("ssid", config.ssid);
-    preferences.putString("password", config.password);
-    preferences.putString("timezone", config.timezone);
-    preferences.putDouble("latitude", config.latitude);
-    preferences.putDouble("longitude", config.longitude);
-    preferences.putBool("configured", true);
     preferences.end();
-    return true;
+    return saved;
 }
 
 bool isValidConfig(const DeviceConfig &config)
@@ -248,10 +336,7 @@ bool isValidConfig(const DeviceConfig &config)
     const size_t passwordLength = config.password.length();
     return config.ssid.length() > 0 && config.ssid.length() <= 32 &&
            (passwordLength == 0 || (passwordLength >= 8 && passwordLength <= 63)) &&
-           config.timezone.length() > 0 && config.timezone.length() <= 63 &&
-           isValidContactEmail(config.contactEmail) &&
-           isfinite(config.latitude) && config.latitude >= -90.0 && config.latitude <= 90.0 &&
-           isfinite(config.longitude) && config.longitude >= -180.0 && config.longitude <= 180.0;
+           isValidContactEmail(config.contactEmail);
 }
 
 bool isValidContactEmail(const String &email)
@@ -309,10 +394,7 @@ String configurationPage(const String &message)
             "<label for=\"ssid\">Wi-Fi network name</label><input id=\"ssid\" name=\"ssid\" maxlength=\"32\" required value=\"" + htmlEscape(deviceConfig.ssid) + "\">"
             "<label for=\"password\">Wi-Fi password</label><input id=\"password\" name=\"password\" type=\"password\" maxlength=\"63\" autocomplete=\"new-password\">"
             "<small>Leave blank only if the network is open.</small>"
-            "<label for=\"latitude\">Latitude</label><input id=\"latitude\" name=\"latitude\" type=\"number\" step=\"any\" min=\"-90\" max=\"90\" required value=\"" + String(deviceConfig.latitude, 6) + "\">"
-            "<label for=\"longitude\">Longitude</label><input id=\"longitude\" name=\"longitude\" type=\"number\" step=\"any\" min=\"-180\" max=\"180\" required value=\"" + String(deviceConfig.longitude, 6) + "\">"
-            "<label for=\"timezone\">POSIX time-zone rule</label><input id=\"timezone\" name=\"timezone\" maxlength=\"63\" required value=\"" + htmlEscape(deviceConfig.timezone) + "\">"
-            "<small>Example: PST8PDT,M3.2.0,M11.1.0</small>"
+            "<small>Location and time zone are estimated from your public IP using ipwho.is after connecting.</small>"
             "<label for=\"contactEmail\">MET Norway contact email</label><input id=\"contactEmail\" name=\"contactEmail\" type=\"email\" maxlength=\"254\" required value=\"" + htmlEscape(deviceConfig.contactEmail) + "\">"
             "<small>Sent to MET Norway to identify this app in API requests.</small><br><button type=\"submit\">Save and connect</button></form></body></html>";
     return page;
@@ -323,19 +405,10 @@ void handleConfigurationSave()
     DeviceConfig candidate;
     candidate.ssid = configServer.arg("ssid");
     candidate.password = configServer.arg("password");
-    candidate.timezone = configServer.arg("timezone");
     candidate.contactEmail = configServer.arg("contactEmail");
 
-    String latitudeValue = configServer.arg("latitude");
-    String longitudeValue = configServer.arg("longitude");
-    char *latitudeEnd = nullptr;
-    char *longitudeEnd = nullptr;
-    candidate.latitude = strtod(latitudeValue.c_str(), &latitudeEnd);
-    candidate.longitude = strtod(longitudeValue.c_str(), &longitudeEnd);
-
-    if (latitudeEnd == latitudeValue.c_str() || *latitudeEnd != '\0' ||
-        longitudeEnd == longitudeValue.c_str() || *longitudeEnd != '\0' || !isValidConfig(candidate)) {
-        configServer.send(400, "text/html; charset=utf-8", configurationPage("Please check the network, coordinates, time-zone rule, and contact email."));
+    if (!isValidConfig(candidate)) {
+        configServer.send(400, "text/html; charset=utf-8", configurationPage("Please check the network and contact email."));
         return;
     }
     if (!saveDeviceConfig(candidate)) {
@@ -405,6 +478,371 @@ bool connectToWiFi()
         Serial.println(" failed to connect within 20s.");
         return false;
     }
+}
+
+bool loadLocationMode()
+{
+    Preferences preferences;
+    if (!preferences.begin(CONFIG_NAMESPACE, true)) {
+        Serial.println("Could not read the location mode.");
+        return false;
+    }
+    manualLocation = preferences.getBool("manualLoc", false);
+    preferences.end();
+    return true;
+}
+
+bool loadManualLocation()
+{
+    Preferences preferences;
+    if (!preferences.begin(CONFIG_NAMESPACE, true)) {
+        Serial.println("Could not read the manual location.");
+        return false;
+    }
+    ManualLocation location = {};
+    bool valid = preferences.getBytesLength("manualGeo") == sizeof(location) &&
+                 preferences.getBytes("manualGeo", &location, sizeof(location)) == sizeof(location);
+    preferences.end();
+
+    const char *posix = nullptr;
+    if (valid && memchr(location.timezoneId, '\0', sizeof(location.timezoneId)) &&
+        location.timezoneId[0]) {
+        posix = TzDbLookup::getPosix(location.timezoneId);
+    }
+    valid = valid && posix && *posix && isfinite(location.latitude) &&
+            location.latitude >= -90.0 && location.latitude <= 90.0 &&
+            isfinite(location.longitude) && location.longitude >= -180.0 && location.longitude <= 180.0;
+    if (!valid) {
+        Serial.println("Manual location is invalid; update it on the network settings page.");
+        return false;
+    }
+    deviceConfig.latitude = location.latitude;
+    deviceConfig.longitude = location.longitude;
+    deviceConfig.timezoneId = location.timezoneId;
+    deviceConfig.timezone = posix;
+    return true;
+}
+
+bool saveManualLocation(const ManualLocation &location)
+{
+    Preferences preferences;
+    if (!preferences.begin(CONFIG_NAMESPACE, false)) return false;
+    bool wasManual = preferences.getBool("manualLoc", false);
+    bool saved = preferences.putBytes("manualGeo", &location, sizeof(location)) == sizeof(location) &&
+                 (wasManual || preferences.putBool("manualLoc", true) > 0);
+    preferences.end();
+    return saved;
+}
+
+bool useAutomaticLocation()
+{
+    Preferences preferences;
+    if (!preferences.begin(CONFIG_NAMESPACE, false)) return false;
+    bool saved = preferences.putBool("manualLoc", false) > 0;
+    preferences.end();
+    return saved;
+}
+
+bool validSettingsHost()
+{
+    String host = configServer.hostHeader();
+    String address = WiFi.localIP().toString();
+    return host == address || host == address + ":80";
+}
+
+String settingsPage(const String &message, const String &mode, const String &latitude,
+                    const String &longitude, const String &timezoneId)
+{
+    String page = "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                  "<title>Moon Phase Clock Location</title><style>body{font:16px sans-serif;max-width:32rem;margin:2rem auto;padding:0 1rem;background:#101820;color:#f2f4f3}"
+                  "label{display:block;margin:1rem 0 .35rem}input,select{box-sizing:border-box;width:100%;padding:.7rem;font:inherit}"
+                  "button{margin-top:1.2rem;padding:.75rem 1rem;font:inherit}small{color:#c4cfce}</style></head><body>"
+                  "<h1>Moon Phase Clock</h1><h2>Location and time zone</h2>";
+    if (message.length()) page += "<p>" + htmlEscape(message) + "</p>";
+    page += "<p>Current mode: ";
+    page += manualLocation ? "Manual" : (geolocationPending ? "Automatic (lookup pending; values may be cached)" : "Automatic");
+    page += locationValid ? ".</p>" : ". Location is not available.</p>";
+    page += "<form method=\"post\" action=\"/location\">"
+            "<input type=\"hidden\" name=\"token\" value=\"" + htmlEscape(settingsToken) + "\">"
+            "<label for=\"mode\">Location source</label><select id=\"mode\" name=\"mode\">"
+            "<option value=\"auto\"" + String(mode == "auto" ? " selected" : "") + ">Automatic IP-based location</option>"
+            "<option value=\"manual\"" + String(mode == "manual" ? " selected" : "") + ">Manual location and time zone</option></select>"
+            "<label for=\"latitude\">Latitude</label><input id=\"latitude\" name=\"latitude\" inputmode=\"decimal\" value=\"" + htmlEscape(latitude) + "\">"
+            "<label for=\"longitude\">Longitude</label><input id=\"longitude\" name=\"longitude\" inputmode=\"decimal\" value=\"" + htmlEscape(longitude) + "\">"
+            "<label for=\"timezone\">IANA time zone</label><input id=\"timezone\" name=\"timezone\" maxlength=\"63\" value=\"" + htmlEscape(timezoneId) + "\">"
+            "<small>For manual mode, enter coordinates and a time zone such as Australia/Sydney or America/Los_Angeles. Automatic mode ignores these fields.</small>"
+            "<br><button type=\"submit\">Save and restart</button></form></body></html>";
+    return page;
+}
+
+void handleSettingsSave()
+{
+    configServer.sendHeader("Cache-Control", "no-store");
+    configServer.sendHeader("X-Frame-Options", "DENY");
+    configServer.sendHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+    if (!validSettingsHost() || configServer.arg("token") != settingsToken) {
+        configServer.send(403, "text/plain", "Invalid settings request.");
+        return;
+    }
+
+    String mode = configServer.arg("mode");
+    String latitude = configServer.arg("latitude");
+    String longitude = configServer.arg("longitude");
+    String timezoneId = configServer.arg("timezone");
+    bool saved = false;
+    if (mode == "auto") {
+        saved = useAutomaticLocation();
+    } else if (mode == "manual") {
+        char *latEnd = nullptr;
+        char *lonEnd = nullptr;
+        double lat = strtod(latitude.c_str(), &latEnd);
+        double lon = strtod(longitude.c_str(), &lonEnd);
+        const char *posix = timezoneId.length() <= 63 ? TzDbLookup::getPosix(timezoneId.c_str()) : nullptr;
+        if (latEnd == latitude.c_str() || *latEnd != '\0' ||
+            lonEnd == longitude.c_str() || *lonEnd != '\0' ||
+            !isfinite(lat) || lat < -90.0 || lat > 90.0 ||
+            !isfinite(lon) || lon < -180.0 || lon > 180.0 || !posix || !*posix) {
+            configServer.send(400, "text/html; charset=utf-8",
+                              settingsPage("Enter valid coordinates and a supported IANA time zone.", mode, latitude, longitude, timezoneId));
+            return;
+        }
+        ManualLocation location = {};
+        location.latitude = lat;
+        location.longitude = lon;
+        memcpy(location.timezoneId, timezoneId.c_str(), timezoneId.length() + 1);
+        saved = saveManualLocation(location);
+    } else {
+        configServer.send(400, "text/html; charset=utf-8",
+                          settingsPage("Select a valid location source.", mode, latitude, longitude, timezoneId));
+        return;
+    }
+    if (!saved) {
+        configServer.send(500, "text/html; charset=utf-8",
+                          settingsPage("Could not save settings. Please try again.", mode, latitude, longitude, timezoneId));
+        return;
+    }
+
+    configServer.send(200, "text/html; charset=utf-8", "<p>Settings saved. The clock is restarting.</p>");
+    delay(750);
+    ESP.restart();
+}
+
+void startSettingsServer()
+{
+    char token[33];
+    snprintf(token, sizeof(token), "%08lx%08lx%08lx%08lx",
+             (unsigned long)esp_random(), (unsigned long)esp_random(),
+             (unsigned long)esp_random(), (unsigned long)esp_random());
+    settingsToken = token;
+    configServer.on("/", HTTP_GET, []() {
+        if (!validSettingsHost()) {
+            configServer.send(403, "text/plain", "Use the clock's IP address.");
+            return;
+        }
+        configServer.sendHeader("Cache-Control", "no-store");
+        configServer.sendHeader("X-Frame-Options", "DENY");
+        configServer.sendHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+        configServer.send(200, "text/html; charset=utf-8",
+                          settingsPage("", manualLocation ? "manual" : "auto",
+                                       locationValid ? String(deviceConfig.latitude, 6) : "",
+                                       locationValid ? String(deviceConfig.longitude, 6) : "",
+                                       locationValid ? deviceConfig.timezoneId : ""));
+    });
+    configServer.on("/location", HTTP_POST, handleSettingsSave);
+    configServer.onNotFound([]() {
+        configServer.send(404, "text/plain", "Not found.");
+    });
+    configServer.begin();
+}
+
+void showIpAddress()
+{
+    String address = WiFi.localIP().toString();
+    String text = "Settings address:\n" + address;
+    lv_label_set_text(ui_ip_label, text.c_str());
+    lv_obj_center(ui_ip_label);
+    lv_obj_clear_flag(ui_ip_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(ui_ip_overlay);
+    lv_refr_now(NULL);
+    ipShownAt = millis();
+    showingIp = true;
+    Serial.printf("Settings: http://%s/\n", address.c_str());
+}
+
+void updateIpDisplay()
+{
+    if (showingIp && millis() - ipShownAt >= 10000UL) {
+        lv_obj_add_flag(ui_ip_overlay, LV_OBJ_FLAG_HIDDEN);
+        lv_refr_now(NULL);
+        showingIp = false;
+    }
+}
+
+bool loadCachedLocation()
+{
+    Preferences preferences;
+    if (!preferences.begin(CONFIG_NAMESPACE, true)) {
+        Serial.println("Could not read cached location.");
+        return false;
+    }
+
+    bool valid = preferences.getBool("geoValid", false) &&
+                 preferences.getString("geoNetwork", "") == deviceConfig.ssid &&
+                 preferences.isKey("geoLat") && preferences.isKey("geoLon") &&
+                 preferences.isKey("geoTz");
+    if (valid) {
+        deviceConfig.latitude = preferences.getDouble("geoLat", NAN);
+        deviceConfig.longitude = preferences.getDouble("geoLon", NAN);
+        deviceConfig.timezone = preferences.getString("geoTz", "");
+        deviceConfig.timezoneId = preferences.getString("geoIana", "");
+        valid = isfinite(deviceConfig.latitude) && deviceConfig.latitude >= -90.0 &&
+                deviceConfig.latitude <= 90.0 && isfinite(deviceConfig.longitude) &&
+                deviceConfig.longitude >= -180.0 && deviceConfig.longitude <= 180.0 &&
+                deviceConfig.timezone.length() > 0;
+        if (!valid) Serial.println("Cached location is invalid.");
+    }
+    preferences.end();
+    return valid;
+}
+
+bool saveCachedLocation()
+{
+    Preferences preferences;
+    if (!preferences.begin(CONFIG_NAMESPACE, false)) return false;
+
+    bool saved = preferences.putBool("geoValid", false) > 0 &&
+                 preferences.putString("geoNetwork", deviceConfig.ssid) > 0 &&
+                 preferences.putDouble("geoLat", deviceConfig.latitude) > 0 &&
+                 preferences.putDouble("geoLon", deviceConfig.longitude) > 0 &&
+                 preferences.putString("geoTz", deviceConfig.timezone) > 0 &&
+                 preferences.putString("geoIana", deviceConfig.timezoneId) > 0 &&
+                 preferences.putBool("geoValid", true) > 0;
+    preferences.end();
+    return saved;
+}
+
+bool fetchLocation(DeviceConfig &result, uint64_t &retryMs)
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("Geolocation failed: Wi-Fi is not connected.");
+        return false;
+    }
+    time_t now;
+    time(&now);
+    if (now < 1672531200) {
+        Serial.println("Geolocation waiting for NTP time to verify HTTPS.");
+        return false;
+    }
+
+    WiFiClientSecure client;
+    client.setCACert(GEOLOCATION_CA);
+    HTTPClient http;
+    http.setConnectTimeout(5000);
+    http.setTimeout(5000);
+    http.useHTTP10(true);
+    if (!http.begin(client, GEOLOCATION_URL)) {
+        Serial.println("Failed to initialize geolocation request.");
+        return false;
+    }
+    const char *headers[] = {"Retry-After"};
+    http.collectHeaders(headers, 1);
+    int status = http.GET();
+    if (status != HTTP_CODE_OK) {
+        Serial.printf("Geolocation request failed, HTTP code: %d (%s)\n",
+                      status, http.errorToString(status).c_str());
+        if (status == 429) {
+            retryMs = 24ULL * 60ULL * 60ULL * 1000ULL;
+            String header = http.header("Retry-After");
+            char *end = nullptr;
+            errno = 0;
+            unsigned long long seconds = strtoull(header.c_str(), &end, 10);
+            if (header.length() && header[0] >= '0' && header[0] <= '9' &&
+                end != header.c_str() && *end == '\0' && errno != ERANGE &&
+                seconds > 0 && seconds <= UINT64_MAX / 1000ULL - 86400ULL) {
+                retryMs = seconds * 1000ULL;
+                if (retryMs < GEOLOCATION_RETRY_MS) retryMs = GEOLOCATION_RETRY_MS;
+            }
+        }
+        http.end();
+        return false;
+    }
+
+    DynamicJsonDocument doc(2048);
+    DeserializationError error = deserializeJson(doc, http.getStream());
+    http.end();
+    if (error) {
+        Serial.printf("Geolocation JSON parse failed: %s\n", error.c_str());
+        return false;
+    }
+    if (!doc["success"].is<bool>() || !doc["success"].as<bool>()) {
+        Serial.printf("Geolocation service returned an error: %s\n", doc["message"] | "unknown error");
+        return false;
+    }
+    JsonVariantConst latitude = doc["latitude"];
+    JsonVariantConst longitude = doc["longitude"];
+    const char *iana = doc["timezone"]["id"] | (const char *)nullptr;
+    if (!latitude.is<double>() || !longitude.is<double>() || !iana || !*iana) {
+        Serial.println("Geolocation response is missing coordinates or a time zone.");
+        return false;
+    }
+    double lat = latitude.as<double>();
+    double lon = longitude.as<double>();
+    if (!isfinite(lat) || lat < -90.0 || lat > 90.0 ||
+        !isfinite(lon) || lon < -180.0 || lon > 180.0) {
+        Serial.println("Geolocation response contains invalid coordinates.");
+        return false;
+    }
+    const char *posix = TzDbLookup::getPosix(iana);
+    if (!posix || !*posix) {
+        Serial.printf("Unsupported geolocation time zone: %s\n", iana);
+        return false;
+    }
+    Serial.printf("Geolocation: %s, time zone %s\n", doc["city"] | "(unknown city)", iana);
+    result.latitude = lat;
+    result.longitude = lon;
+    result.timezone = posix;
+    result.timezoneId = iana;
+    return true;
+}
+
+bool applyLocation(const DeviceConfig &config)
+{
+    if (setenv("TZ", config.timezone.c_str(), 1) != 0) {
+        Serial.println("Could not apply the geolocation time zone.");
+        return false;
+    }
+    tzset();
+    lv_img_set_pivot(ui_img_moon, 50, 50);
+    lv_img_set_angle(ui_img_moon, config.latitude < 0.0 ? 1800 : 0);
+    return true;
+}
+
+void updateGeolocation()
+{
+    uint64_t now = (uint64_t)esp_timer_get_time() / 1000ULL;
+    if (!geolocationPending || now < nextGeolocationAttemptMs) return;
+
+    uint64_t retryMs = GEOLOCATION_RETRY_MS;
+    DeviceConfig result = deviceConfig;
+    if (fetchLocation(result, retryMs) && applyLocation(result)) {
+        bool changed = !locationValid || deviceConfig.latitude != result.latitude ||
+                       deviceConfig.longitude != result.longitude || deviceConfig.timezone != result.timezone ||
+                       deviceConfig.timezoneId != result.timezoneId;
+        deviceConfig = result;
+        locationValid = true;
+        geolocationPending = false;
+        if (changed && !saveCachedLocation()) {
+            Serial.println("Could not save the geolocation cache.");
+        }
+        moonDataValid = false;
+        updateClockLabels();
+        updateMoonData();
+        lastMoonMillis = millis();
+        return;
+    }
+    nextGeolocationAttemptMs = (uint64_t)esp_timer_get_time() / 1000ULL + retryMs;
+    Serial.printf("Geolocation will retry in %llu seconds.\n", retryMs / 1000ULL);
+    if (!locationValid) setMoonPhaseLabel("Location error");
 }
 
 bool waitForTimeSync(uint32_t timeoutMs)
