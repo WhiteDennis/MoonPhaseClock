@@ -65,17 +65,17 @@ static const char *GEOLOCATION_URL = "https://ipwho.is/?fields=success,message,l
 static lv_disp_draw_buf_t draw_buf;
 static lv_color_t buf1[240 * 40];
 static lv_disp_drv_t disp_drv;
-static bool displayDimmed = false;
-static_assert(LV_COLOR_DEPTH == 16 && LV_COLOR_16_SWAP == 0, "Display dimming requires unswapped RGB565 colors.");
+static bool displayBlanked = false;
+static_assert(LV_COLOR_DEPTH == 16 && LV_COLOR_16_SWAP == 0, "Display output requires unswapped RGB565 colors.");
 
 static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
 {
     uint32_t w = (area->x2 - area->x1 + 1);
     uint32_t h = (area->y2 - area->y1 + 1);
 
-    if (displayDimmed) {
+    if (displayBlanked) {
         for (uint32_t i = 0; i < w * h; i++) {
-            color_p[i].full = (color_p[i].full >> 1) & 0x7BEF;
+            color_p[i].full = 0;
         }
     }
 
@@ -407,7 +407,7 @@ String htmlEscape(const String &value)
 String autoDimCheckbox(bool enabled)
 {
     return String("<label for=\"autoDim\"><input id=\"autoDim\" name=\"autoDim\" type=\"checkbox\" value=\"1\"") +
-           (enabled ? " checked" : "") + ">Auto-dim display from 10 p.m. to 8 a.m. local time</label>";
+           (enabled ? " checked" : "") + ">Black screen from 10 p.m. to 8 a.m. local time (backlight stays on)</label>";
 }
 
 bool saveAutoDim(bool enabled)
@@ -421,17 +421,17 @@ bool saveAutoDim(bool enabled)
 
 void updateAutoDim()
 {
-    bool shouldDim = false;
+    bool shouldBlank = false;
     if (deviceConfig.autoDim && locationValid) {
         time_t now;
         struct tm localTime;
         time(&now);
         if (localtime_r(&now, &localTime) && localTime.tm_year >= (2023 - 1900)) {
-            shouldDim = localTime.tm_hour >= 22 || localTime.tm_hour < 8;
+            shouldBlank = localTime.tm_hour >= 22 || localTime.tm_hour < 8;
         }
     }
-    if (shouldDim != displayDimmed) {
-        displayDimmed = shouldDim;
+    if (shouldBlank != displayBlanked) {
+        displayBlanked = shouldBlank;
         lv_obj_invalidate(ui_Screen1);
         lv_refr_now(NULL);
     }
@@ -911,6 +911,7 @@ bool applyLocation(const DeviceConfig &config)
     lv_img_set_angle(ui_img_moon, config.latitude < 0.0 ? 1800 : 0);
     return true;
 }
+
 
 void updateGeolocation()
 {
