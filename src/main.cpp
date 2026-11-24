@@ -164,7 +164,7 @@ bool waitForTimeSync(uint32_t timeoutMs);
 void updateClockLabels();
 void updateMoonData();
 void setMoonPhaseLabel(const char *text);
-String getMoonPhase(double age);
+String getMoonPhase(double phase);
 int getMoonImageIndex(double age);
 void setMoonImage(int index);
 void playMoonIntroAnimation();
@@ -1011,15 +1011,15 @@ void playMoonIntroAnimation()
     }
 }
 
-String getMoonPhase(double age)
+String getMoonPhase(double phase)
 {
-    if (age < 1.84566) return "New Moon";
-    else if (age < 5.53699) return "Waxing Crescent";
-    else if (age < 9.22831) return "First Quarter";
-    else if (age < 12.91963) return "Waxing Gibbous";
-    else if (age < 16.61096) return "Full Moon";
-    else if (age < 20.30228) return "Waning Gibbous";
-    else if (age < 23.99361) return "Last Quarter";
+    if (phase < 22.5 || phase == 360.0) return "New Moon";
+    else if (phase < 89.0) return "Waxing Crescent";
+    else if (phase < 91.0) return "First Quarter";
+    else if (phase < 174.0) return "Waxing Gibbous";
+    else if (phase <= 186.0) return "Full Moon";
+    else if (phase <= 269.0) return "Waning Gibbous";
+    else if (phase <= 271.0) return "Last Quarter";
     else return "Waning Crescent";
 }
 
@@ -1132,7 +1132,7 @@ void updateMoonData()
             if (isfinite(phase) && phase >= 0.0 && phase <= 360.0) {
                 double age = (phase == 360.0 ? 0.0 : phase) / 360.0 * 29.53;
                 Serial.printf("Daily moon phase: %.2f degrees\n", phase);
-                String phaseName = getMoonPhase(age);
+                String phaseName = getMoonPhase(phase);
                 setMoonPhaseLabel(phaseName.c_str());
                 setMoonImage(getMoonImageIndex(age));
                 moonDataValid = true;

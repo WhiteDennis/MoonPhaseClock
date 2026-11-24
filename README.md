@@ -88,6 +88,7 @@ Use a Web Serial-compatible browser such as Chrome or Edge, connect the board by
   - Every **15 seconds** until the first successful fetch.
   - Every **1 hour** afterward. MET Norway reports a phase for the day, so the display does not track hourly changes in phase.
 - The reported phase angle is mapped to one of 30 image frames and an 8-phase name (New Moon, Waxing Crescent, First Quarter, Waxing Gibbous, Full Moon, Waning Gibbous, Last Quarter, Waning Crescent).
+- The phase label uses 89°–less than 91° for First Quarter, 91°–less than 174° for Waxing Gibbous, 174°–186° inclusive for Full Moon, over 186°–269° inclusive for Waning Gibbous, and over 269°–271° inclusive for Last Quarter. These are display ranges, not exact event times; MET Norway supplies a daily phase value. The image mapping is unchanged and may look full near the Full Moon window.
 - If moon data cannot be retrieved or the phase is invalid, the phase label shows **API Fail**. The last moon image remains displayed, and a later successful fetch restores the phase name. The retry schedule above is unchanged.
 
 ## Notes
