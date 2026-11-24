@@ -1,0 +1,21 @@
+{
+  "name": "MoonPhaseClock",
+  "version": "1.0.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "improv": false,
+      "parts": [
+        { "path": "esp32dev.bin", "offset": 0 }
+      ]
+    },
+    {
+      "chipFamily": "ESP32-C3",
+      "improv": false,
+      "parts": [
+        { "path": "xiao_esp32c3.bin", "offset": 0 }
+      ]
+    }
+  ]
+}
